@@ -14,12 +14,11 @@ import (
  * a struct which implements the interface "dhtNode".
  */
 
-func NewNode(str string) DhtNode {
+func NewNode(addr string) DhtNode {
 	var i Mynode
-	i.Initialize(str)
+	i.Initialize(addr)
 	var a DhtNode = &i
 	return a
-	// Todo: create a node and then return it.
 }
 
 type Mynode struct {
@@ -57,16 +56,11 @@ func (n *Mynode) Initialize(addr string) {
 
 func (n *Mynode) Reset() {
 	logrus.Info("Node Reset: ", n.Addr)
-	n.Online = false
 	n.Addr = NULL
 	n.Predecessor = NULL
 	n.Successor = NULL
 	n.Data = make(map[string]string)
 	n.BackupData = make(map[string]string)
-	err := n.Listener.Close()
-	if err != nil {
-		return
-	}
 	for i := 0; i < M; i++ {
 		n.Finger[i] = NULL
 	}
@@ -121,7 +115,6 @@ func (n *Mynode) SetSuccessor(p string, _ *string) error {
 }
 
 func (n *Mynode) GetSuccessorList(_ string, ret *[SuccessorListLength]string) error {
-	logrus.Info(n.Addr, " GetSuccessorList Called")
 	n.SucLock.RLock()
 	for i := 0; i < SuccessorListLength; i++ {
 		(*ret)[i] = n.SuccessorList[i]
@@ -154,6 +147,9 @@ func (n *Mynode) StoreBackup() {
 	}
 	n.DataLock.Unlock()
 	n.BackupLock.Unlock()
+	if suc == n.Addr {
+		return
+	}
 	n.BackupLock.RLock()
 	_ = RpcCall(suc, "Mynode.ReceiveBackup", &n.BackupData, nil)
 	n.BackupLock.RUnlock()
@@ -171,7 +167,6 @@ func (n *Mynode) FirstAvailableSuccessor(_ string, ret *string) error {
 		}
 		if n.Ping(n.SuccessorList[i]) {
 			*ret = n.SuccessorList[i]
-			logrus.Info(n.Addr, " FirstAvailableSuccessor ", i, " , ", *ret)
 			n.SucLock.RUnlock()
 			return nil
 		} else {
@@ -188,7 +183,6 @@ func (n *Mynode) FirstAvailableSuccessor(_ string, ret *string) error {
 		}
 	}
 	err := n.FindSuccessor(GetId(n.Addr), ret)
-	logrus.Info(n.Addr, " FirstAvailableSuccessor FindSuccessor ", ret)
 	if err != nil {
 		return err
 	}
@@ -314,7 +308,6 @@ func (n *Mynode) TransferData(id *big.Int, m *map[string]string) error {
 	n.BackupLock.Lock()
 	for key, value := range n.Data {
 		if !InRange(GetId(key), new(big.Int).Add(id, big.NewInt(1)), GetId(n.Addr)) {
-			//GetId(key).Cmp(id) <= 0 || GetId(key).Cmp(GetId(n.Addr)) > 0
 			(*m)[key] = value
 			del[key] = value
 			n.BackupData[key] = value
@@ -362,7 +355,7 @@ func (n *Mynode) ReceiveBackup(m *map[string]string, _ *string) error {
 
 func (n *Mynode) Join(addr string) bool {
 	// addr != NULL
-	logrus.Info("[", n.Addr, "] Node Join : ", n.Addr)
+	logrus.Info(n.Addr, " Node Join Through ", addr)
 	n.Predecessor = NULL
 
 	var tar string
@@ -382,7 +375,6 @@ func (n *Mynode) Join(addr string) bool {
 	n.PreLock.Unlock()
 	_ = RpcCall(suc, "Mynode.SetPredecessor", n.Addr, nil)
 	_ = RpcCall(tar, "Mynode.SetSuccessor", n.Addr, nil) // tar is predecessor
-	logrus.Info(n.Addr, " Node Join, Pre = ", tar, " ,Suc = ", suc)
 
 	n.DataLock.Lock()
 	err = RpcCall(suc, "Mynode.TransferData", GetId(n.Addr), &n.Data)
@@ -400,13 +392,11 @@ func (n *Mynode) Join(addr string) bool {
 
 	n.InitFingerTable(&addr)
 
-	logrus.Info(n.Addr, " Node Join Finished")
 	n.Online = true
 	return true
 }
 
 func (n *Mynode) Ping(addr string) bool {
-	logrus.Trace("[", n.Addr, "] Ping Node", addr)
 	ret, err := Ping(addr)
 	if err != nil {
 		return false
@@ -440,15 +430,15 @@ func (n *Mynode) Put(key string, value string) bool {
 	var tar string
 	err := n.FindSuccessor(GetId(key), &tar)
 	if err != nil {
-		logrus.Info("[", n.Addr, "] FindSuccessor in Put Failed, Error: ", err)
+		logrus.Info(n.Addr, " FindSuccessor in Put Failed, Error: ", err)
 		return false
 	}
 	err = RpcCall(tar, "Mynode.PutData", Pair{key, value}, nil)
 	if err != nil {
-		logrus.Error("[", n.Addr, "] Put Failed, Error: ", err)
+		logrus.Error(n.Addr, " Put Failed, Error: ", err)
 		return false
 	}
-	logrus.Info("[", n.Addr, "] Successful Put [", key, ',', value, ']')
+	logrus.Info(n.Addr, " Successfully Put [", key, ',', value, ']')
 	return true
 }
 
@@ -548,9 +538,13 @@ func (n *Mynode) Delete(key string) bool {
 } // try multiple times, with some interval
 
 func (n *Mynode) Stabilize() {
+	if !n.Online {
+		return
+	}
 	var tar, nxt string
+	tar = NULL
+	nxt = NULL
 	_ = n.FirstAvailableSuccessor(NULL, &nxt)
-	logrus.Info(n.Addr, " 's FirstAvailableSuccessor is ", nxt)
 	err := RpcCall(nxt, "Mynode.GetPredecessor", NULL, &tar)
 	if err != nil {
 		return
@@ -567,7 +561,7 @@ func (n *Mynode) Stabilize() {
 	var list [SuccessorListLength]string
 	err = RpcCall(nxt, "Mynode.GetSuccessorList", NULL, &list)
 	if err != nil {
-		logrus.Error(n.Addr, ",", nxt, " GetSuccessorList Failed in Stabilize")
+		logrus.Error(n.Addr, ",", nxt, " GetSuccessorList Failed in Stabilize, Error: ", err)
 		return
 	}
 	pos := 1
@@ -649,19 +643,16 @@ func (n *Mynode) Maintain() {
 			time.Sleep(MaintainWaitTime)
 		}
 	}()
-	go func() {
-		for {
-			logrus.Info(n.Addr, " 's Predecessor is ", n.Predecessor, ", sucessor is ", n.Successor)
-			for i := 0; i < SuccessorListLength; i++ {
-				logrus.Info(n.Addr, " 's Successor List ", i, " : ", n.SuccessorList[i])
-			}
-			time.Sleep(1 * time.Second)
-		}
-	}()
 }
 
 func (n *Mynode) Close() {
+	n.Online = false
 	n.QuitSignal <- true
+	err := n.Listener.Close()
+	if err != nil {
+		logrus.Error(n.Addr, " Listener Close Failed")
+		return
+	}
 }
 
 func (n *Mynode) ReceiveData(m *map[string]string, _ *string) error {
@@ -673,20 +664,37 @@ func (n *Mynode) ReceiveData(m *map[string]string, _ *string) error {
 	return nil
 }
 
+func (n *Mynode) CheckPredecessor_(_ string, _ *string) error {
+	n.CheckPredecessor()
+	return nil
+}
+
+func (n *Mynode) Stabilize_(_ string, _ *string) error {
+	n.Stabilize()
+	return nil
+}
+
 func (n *Mynode) Quit() {
+	if !n.Online {
+		logrus.Error("Node has already been Quitted ", n.Addr)
+		return
+	}
 	logrus.Info("Node Quit: ", n.Addr)
-	//var suc string
-	//_ = n.FirstAvailableSuccessor(NULL, &suc)
-	//_ = RpcCall(suc, "Mynode.ReceiveData", &n.Data, nil)
+	var suc, pre string
+	_ = n.GetPredecessor(NULL, &pre)
+	_ = n.FirstAvailableSuccessor(NULL, &suc)
 	n.Close()
+	_ = RpcCall(suc, "Mynode.CheckPredecessor_", NULL, nil)
+	_ = RpcCall(pre, "Mynode.Stabilize_", NULL, nil)
 	n.Reset()
 }
 
 func (n *Mynode) ForceQuit() {
+	if !n.Online {
+		logrus.Error("Node has already been Quitted ", n.Addr)
+		return
+	}
 	logrus.Info("Node ForceQuit: ", n.Addr)
-	//var suc string
-	//_ = n.FirstAvailableSuccessor(NULL, &suc)
-	//_ = RpcCall(suc, "Mynode.ReceiveData", &n.Data, nil)
 	n.Close()
 	n.Reset()
 }
